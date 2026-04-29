@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.cache/
+train/
+val/
+*.zip
+
+GroundingDINO-main/
+M-SpecGene-main/
