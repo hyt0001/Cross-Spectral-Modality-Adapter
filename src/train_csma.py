@@ -30,6 +30,7 @@ from src.cmss_utils import CMSSScheduler, build_cmss_mask, compute_cmss
 from src.config import CSMAConfig
 from src.csma import CSMA
 from src.dataset import build_coco_category_to_class_index
+from src.dataset_flir_v2 import FlirADASV2Dataset, build_flir_v2_category_map, collate_flir_v2
 from src.dataset_paired import FlirPairedDataset, collate_paired
 from src.infer_vis import save_multi_sample_grid
 
@@ -229,12 +230,20 @@ def collect_cmss_values(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CSMA 训练：冻结 DINO + 可训练 CSMA + GMM-CMSS L_align")
-    parser.add_argument("--data-root",     type=str, default="train",       help="IR 数据目录（含 _annotations.coco.json）")
-    parser.add_argument("--rgb-data-root", type=str, default="train/rgb",   help="RGB 配对图像目录")
+    parser.add_argument("--dataset",       type=str, default="legacy",
+                        choices=["legacy", "flir_v2"],
+                        help="数据集类型：legacy=旧版 train/ 目录，flir_v2=FLIR_ADAS_v2")
+    parser.add_argument("--data-root",     type=str, default="train",
+                        help="legacy: IR 目录（含 _annotations.coco.json）；"
+                             "flir_v2: thermal split 目录（如 FLIR_ADAS_v2/images_thermal_train）")
+    parser.add_argument("--rgb-data-root", type=str, default="train/rgb",   help="RGB 配对图像目录（仅 legacy 模式）")
     parser.add_argument("--out-dir",       type=str, default="outputs_csma",help="ckpt / logs / vis 输出根目录")
     parser.add_argument("--epochs",        type=int, default=None,          help="覆盖 total_epochs")
     parser.add_argument("--batch-size",    type=int, default=None,          help="覆盖 batch_size")
     parser.add_argument("--lr",            type=float, default=None,        help="覆盖学习率")
+    parser.add_argument("--loss-mode",     type=str, default=None,
+                        choices=["full", "det_only", "align_only"],
+                        help="覆盖 loss_mode（flir_v2 模式默认强制为 det_only）")
     parser.add_argument("--use-swanlab",   action="store_true",             help="启用 SwanLab 记录")
     parser.add_argument("--swanlab-project",  type=str, default="csma-training")
     parser.add_argument("--swanlab-run-name", type=str, default="csma-run")
@@ -248,6 +257,11 @@ def main() -> None:
     overrides["ir_data_root"]  = args.data_root
     overrides["rgb_data_root"] = args.rgb_data_root
     overrides["output_dir"]    = args.out_dir
+    # flir_v2 模式：无 RGB 配对，强制 det_only（除非用户显式指定）
+    if args.dataset == "flir_v2":
+        overrides["loss_mode"] = args.loss_mode if args.loss_mode else "det_only"
+    elif args.loss_mode is not None:
+        overrides["loss_mode"] = args.loss_mode
     cfg = CSMAConfig.from_overrides(overrides)
 
     if torch.cuda.is_available():
@@ -283,20 +297,36 @@ def main() -> None:
     cmss_sched = CMSSScheduler(cfg)
 
     # Phase 5.5：数据集与 DataLoader
-    cat_map = build_coco_category_to_class_index(cfg.text_prompt)
-    dataset = FlirPairedDataset(
-        ir_root=cfg.ir_data_root,
-        rgb_root=cfg.rgb_data_root,
-        processor=processor,
-        text_prompt=cfg.text_prompt,
-        coco_category_id_to_class_idx=cat_map,
-    )
+    if args.dataset == "flir_v2":
+        cat_map, valid_ids = build_flir_v2_category_map(cfg.text_prompt)
+        dataset = FlirADASV2Dataset(
+            root=cfg.ir_data_root,
+            processor=processor,
+            text_prompt=cfg.text_prompt,
+            category_map=cat_map,
+            valid_cat_ids=valid_ids,
+        )
+        collate_fn_use = collate_flir_v2
+        print(f"[train_csma] 数据集模式: flir_v2  loss_mode={cfg.loss_mode}")
+    else:
+        cat_map = build_coco_category_to_class_index(cfg.text_prompt)
+        dataset = FlirPairedDataset(
+            ir_root=cfg.ir_data_root,
+            rgb_root=cfg.rgb_data_root,
+            processor=processor,
+            text_prompt=cfg.text_prompt,
+            coco_category_id_to_class_idx=cat_map,
+        )
+        collate_fn_use = collate_paired
+        print(f"[train_csma] 数据集模式: legacy  loss_mode={cfg.loss_mode}")
+
     loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
-        collate_fn=collate_paired,
+        collate_fn=collate_fn_use,
         num_workers=cfg.num_workers,
+        pin_memory=True,
     )
     print(f"[train_csma] 数据集大小: {len(dataset)}，每 epoch {len(loader)} 个 batch")
 

@@ -344,8 +344,13 @@ def main() -> None:
     )
     parser.add_argument("--ckpt",             type=str, required=True,
                         help="CSMA state_dict 路径（必填）")
-    parser.add_argument("--data-root",        type=str, default="train",
-                        help="IR 数据目录（含 _annotations.coco.json）")
+    parser.add_argument("--dataset",          type=str, default="flir_v2",
+                        choices=["legacy", "flir_v2"],
+                        help="数据集类型：legacy=旧版 train/ 目录；flir_v2=FLIR_ADAS_v2（默认）")
+    parser.add_argument("--data-root",        type=str,
+                        default="FLIR_ADAS_v2/images_thermal_val",
+                        help="数据目录：legacy 时含 _annotations.coco.json；"
+                             "flir_v2 时含 coco.json + data/（默认 thermal_val）")
     parser.add_argument("--out",              type=str,
                         default="outputs_csma/vis/infer_grid.png",
                         help="多样本对比 PNG 输出路径")
@@ -354,14 +359,15 @@ def main() -> None:
     parser.add_argument("--stage",            type=int, default=0,
                         choices=[0, 1, 2],
                         help="--out-mask 时使用的课程阶段：0=A(Easy) 1=B(Mixed) 2=C(Hard)")
-    parser.add_argument("--num-samples",      type=int, default=3,
-                        help="可视化样本数")
+    parser.add_argument("--num-samples",      type=int, default=5,
+                        help="可视化样本数（默认 5）")
     parser.add_argument("--box-threshold",    type=float, default=0.3)
     parser.add_argument("--text-threshold",   type=float, default=0.25)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[infer_csma] 设备: {device}")
+    print(f"[infer_csma] 数据集模式: {args.dataset}")
 
     # Phase 4.1：加载处理器与 DINO
     model_id = "IDEA-Research/grounding-dino-tiny"
@@ -377,18 +383,34 @@ def main() -> None:
     # Phase 4.2：加载 CSMA 权重
     cfg = CSMAConfig()
     csma = CSMA(cfg).to(device)
-    state = torch.load(args.ckpt, map_location=device)
+    state = torch.load(args.ckpt, map_location=device, weights_only=True)
     csma.load_state_dict(state)
     csma.eval()
     print(f"[infer_csma] 已加载 CSMA 权重: {args.ckpt}")
 
-    # Phase 4.3：加载数据集
-    from src.dataset import FlirCocoOverfitDataset, build_coco_category_to_class_index
+    # Phase 4.3：加载数据集（支持 legacy 与 flir_v2 两种模式）
+    if args.dataset == "flir_v2":
+        from src.dataset_flir_v2 import (
+            FlirADASV2Dataset,
+            build_flir_v2_category_map,
+        )
 
-    cat_map = build_coco_category_to_class_index(text_prompt)
-    dataset = FlirCocoOverfitDataset(
-        args.data_root, processor, text_prompt, cat_map
-    )
+        cat_map, valid_ids = build_flir_v2_category_map(text_prompt)
+        dataset = FlirADASV2Dataset(
+            root=args.data_root,
+            processor=processor,
+            text_prompt=text_prompt,
+            category_map=cat_map,
+            valid_cat_ids=valid_ids,
+        )
+    else:
+        from src.dataset import FlirCocoOverfitDataset, build_coco_category_to_class_index
+
+        cat_map = build_coco_category_to_class_index(text_prompt)
+        dataset = FlirCocoOverfitDataset(
+            args.data_root, processor, text_prompt, cat_map
+        )
+
     samples = [dataset[i] for i in range(min(args.num_samples, len(dataset)))]
     print(f"[infer_csma] 数据集大小: {len(dataset)}，可视化 {len(samples)} 张")
 

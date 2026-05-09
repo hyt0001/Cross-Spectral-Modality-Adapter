@@ -10,7 +10,7 @@
 - **项目类型**: MVP / 研究性项目
 - **后端架构**: Python 3.11
 - **版本管理**: Git
-- **Conda 环境**: ExplicitLLM (Python 3.11)
+- **Conda 环境**: RGBtest (Python 3.11)
 
 ## 2. 常用命令 (Commands)
 
