@@ -17,6 +17,7 @@ FLIR_ADAS_v2/
 # 训练产出与权重
 outputs_csma/
 outputs_csma_smoke/
+outputs_smoke/
 wandb/
 swanlog/
 

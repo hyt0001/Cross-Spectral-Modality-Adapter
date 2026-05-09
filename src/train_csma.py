@@ -30,6 +30,7 @@ from src.cmss_utils import CMSSScheduler, build_cmss_mask, compute_cmss
 from src.config import CSMAConfig
 from src.csma import CSMA
 from src.dataset import build_coco_category_to_class_index
+from src.dataset_flir_v1 import FlirV1PairedDataset, build_flir_v1_category_map, collate_flir_v1
 from src.dataset_flir_v2 import FlirADASV2Dataset, build_flir_v2_category_map, collate_flir_v2
 from src.dataset_paired import FlirPairedDataset, collate_paired
 from src.infer_vis import save_multi_sample_grid
@@ -230,12 +231,14 @@ def collect_cmss_values(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CSMA 训练：冻结 DINO + 可训练 CSMA + GMM-CMSS L_align")
-    parser.add_argument("--dataset",       type=str, default="legacy",
-                        choices=["legacy", "flir_v2"],
-                        help="数据集类型：legacy=旧版 train/ 目录，flir_v2=FLIR_ADAS_v2")
-    parser.add_argument("--data-root",     type=str, default="train",
-                        help="legacy: IR 目录（含 _annotations.coco.json）；"
-                             "flir_v2: thermal split 目录（如 FLIR_ADAS_v2/images_thermal_train）")
+    parser.add_argument("--dataset",       type=str, default="flir_v1",
+                        choices=["legacy", "flir_v1", "flir_v2"],
+                        help="数据集类型：flir_v1=FLIR_License 配对数据集（默认）；"
+                             "flir_v2=FLIR_ADAS_v2 无配对；legacy=旧版 train/ 目录")
+    parser.add_argument("--data-root",     type=str, default="FLIR_License/train",
+                        help="flir_v1: split 目录（含 thermal_annotations.json + thermal_8_bit/ + RGB/）；"
+                             "flir_v2: thermal split 目录（含 coco.json + data/）；"
+                             "legacy: IR 目录（含 _annotations.coco.json）")
     parser.add_argument("--rgb-data-root", type=str, default="train/rgb",   help="RGB 配对图像目录（仅 legacy 模式）")
     parser.add_argument("--out-dir",       type=str, default="outputs_csma",help="ckpt / logs / vis 输出根目录")
     parser.add_argument("--epochs",        type=int, default=None,          help="覆盖 total_epochs")
@@ -257,8 +260,12 @@ def main() -> None:
     overrides["ir_data_root"]  = args.data_root
     overrides["rgb_data_root"] = args.rgb_data_root
     overrides["output_dir"]    = args.out_dir
-    # flir_v2 模式：无 RGB 配对，强制 det_only（除非用户显式指定）
-    if args.dataset == "flir_v2":
+    # flir_v1：有 RGB 配对，默认 full（L_det + L_align，完整 GMM-CMSS）
+    # flir_v2：无 RGB 配对，强制 det_only（除非用户显式指定）
+    # legacy：使用用户指定值
+    if args.dataset == "flir_v1":
+        overrides["loss_mode"] = args.loss_mode if args.loss_mode else "full"
+    elif args.dataset == "flir_v2":
         overrides["loss_mode"] = args.loss_mode if args.loss_mode else "det_only"
     elif args.loss_mode is not None:
         overrides["loss_mode"] = args.loss_mode
@@ -297,7 +304,18 @@ def main() -> None:
     cmss_sched = CMSSScheduler(cfg)
 
     # Phase 5.5：数据集与 DataLoader
-    if args.dataset == "flir_v2":
+    if args.dataset == "flir_v1":
+        cat_map, valid_ids = build_flir_v1_category_map(cfg.text_prompt)
+        dataset = FlirV1PairedDataset(
+            root=cfg.ir_data_root,
+            processor=processor,
+            text_prompt=cfg.text_prompt,
+            category_map=cat_map,
+            valid_cat_ids=valid_ids,
+        )
+        collate_fn_use = collate_flir_v1
+        print(f"[train_csma] 数据集模式: flir_v1  loss_mode={cfg.loss_mode}")
+    elif args.dataset == "flir_v2":
         cat_map, valid_ids = build_flir_v2_category_map(cfg.text_prompt)
         dataset = FlirADASV2Dataset(
             root=cfg.ir_data_root,

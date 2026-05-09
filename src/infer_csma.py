@@ -344,13 +344,15 @@ def main() -> None:
     )
     parser.add_argument("--ckpt",             type=str, required=True,
                         help="CSMA state_dict 路径（必填）")
-    parser.add_argument("--dataset",          type=str, default="flir_v2",
-                        choices=["legacy", "flir_v2"],
-                        help="数据集类型：legacy=旧版 train/ 目录；flir_v2=FLIR_ADAS_v2（默认）")
+    parser.add_argument("--dataset",          type=str, default="flir_v1",
+                        choices=["legacy", "flir_v1", "flir_v2"],
+                        help="数据集类型：flir_v1=FLIR_License（默认）；"
+                             "flir_v2=FLIR_ADAS_v2；legacy=旧版 train/ 目录")
     parser.add_argument("--data-root",        type=str,
-                        default="FLIR_ADAS_v2/images_thermal_val",
-                        help="数据目录：legacy 时含 _annotations.coco.json；"
-                             "flir_v2 时含 coco.json + data/（默认 thermal_val）")
+                        default="FLIR_License/val",
+                        help="flir_v1: split 目录（含 thermal_annotations.json + thermal_8_bit/ + RGB/）；"
+                             "flir_v2: thermal split 目录（含 coco.json + data/）；"
+                             "legacy: 含 _annotations.coco.json 的 IR 目录")
     parser.add_argument("--out",              type=str,
                         default="outputs_csma/vis/infer_grid.png",
                         help="多样本对比 PNG 输出路径")
@@ -388,12 +390,20 @@ def main() -> None:
     csma.eval()
     print(f"[infer_csma] 已加载 CSMA 权重: {args.ckpt}")
 
-    # Phase 4.3：加载数据集（支持 legacy 与 flir_v2 两种模式）
-    if args.dataset == "flir_v2":
-        from src.dataset_flir_v2 import (
-            FlirADASV2Dataset,
-            build_flir_v2_category_map,
+    # Phase 4.3：加载数据集（支持 flir_v1 / flir_v2 / legacy 三种模式）
+    if args.dataset == "flir_v1":
+        from src.dataset_flir_v1 import FlirV1PairedDataset, build_flir_v1_category_map
+
+        cat_map, valid_ids = build_flir_v1_category_map(text_prompt)
+        dataset = FlirV1PairedDataset(
+            root=args.data_root,
+            processor=processor,
+            text_prompt=text_prompt,
+            category_map=cat_map,
+            valid_cat_ids=valid_ids,
         )
+    elif args.dataset == "flir_v2":
+        from src.dataset_flir_v2 import FlirADASV2Dataset, build_flir_v2_category_map
 
         cat_map, valid_ids = build_flir_v2_category_map(text_prompt)
         dataset = FlirADASV2Dataset(
