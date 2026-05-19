@@ -40,14 +40,17 @@ echo "========================================================"
 CUDA_VISIBLE_DEVICES=0 \
 HF_HUB_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 conda run --no-capture-output -n RGBtest \
     python3 -m src.train_csma \
-        --dataset     flir_v1 \
-        --data-root   "${DATA_ROOT}" \
-        --out-dir     "${OUT_DIR}" \
-        --epochs      2 \
-        --batch-size  2 \
-        --loss-mode   "${LOSS_MODE}" \
+        --dataset      flir_v1 \
+        --data-root    "${DATA_ROOT}" \
+        --out-dir      "${OUT_DIR}" \
+        --epochs       2 \
+        --batch-size   1 \
+        --loss-mode    "${LOSS_MODE}" \
+        --gmm-batches  50 \
+        --max-steps    20 \
     2>&1 | tee "${LOG_FILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}

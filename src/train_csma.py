@@ -13,6 +13,7 @@ CSMA 训练主程序。
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,23 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda.amp import GradScaler
+from contextlib import contextmanager
+
+@contextmanager
+def _maybe_autocast(enabled: bool):
+    """兼容多版本 PyTorch 的 AMP context manager。"""
+    if enabled:
+        try:
+            # PyTorch 2.x 推荐写法
+            with torch.amp.autocast("cuda"):
+                yield
+        except TypeError:
+            # PyTorch 1.x 兼容写法
+            with torch.cuda.amp.autocast():  # type: ignore[attr-defined]
+                yield
+    else:
+        yield
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -129,8 +147,24 @@ def extract_dino_backbone_features(
     hook_output: Dict[str, torch.Tensor] = {}
 
     def _hook(module: nn.Module, inp: tuple, out: Any) -> None:
-        # inp[0] 为 encoder.forward() 的第一个位置参数：flattened projected src
-        hook_output["feat"] = inp[0]
+        # 优先从输入捕获（encoder 入口特征）；
+        # 新版 transformers 以全关键字参数调用时 inp 为空，改从输出取。
+        if inp and isinstance(inp[0], torch.Tensor):
+            hook_output["feat"] = inp[0]
+        else:
+            # GroundingDinoEncoderOutput 的视觉特征字段
+            if hasattr(out, "last_hidden_state_vision"):
+                hook_output["feat"] = out.last_hidden_state_vision
+            elif hasattr(out, "last_hidden_state"):
+                hook_output["feat"] = out.last_hidden_state
+            elif isinstance(out, (tuple, list)) and len(out) > 0:
+                # 取第一个 Tensor
+                for o in out:
+                    if isinstance(o, torch.Tensor):
+                        hook_output["feat"] = o
+                        break
+            else:
+                hook_output["feat"] = out
 
     handle = dino_model.model.encoder.register_forward_hook(_hook)
     try:
@@ -192,20 +226,27 @@ def collect_cmss_values(
     device: torch.device,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    max_batches: int = 200,
 ) -> np.ndarray:
     """
-    遍历全量训练集（torch.no_grad），收集所有 Patch 的 CMSS 值，供 GMM 重新拟合。
+    随机采样训练集子集（torch.no_grad），收集 Patch 级 CMSS 值供 GMM 重新拟合。
 
-    每个 batch 若无 rgb_pixel_values 则跳过（防御性，FLIR 配对数据集通常全有）。
+    Args:
+        max_batches: 最多采样的 batch 数；-1 表示遍历全量。
+                     200 batch（≈1600 张）统计上足够拟合 3 分量 GMM，
+                     同时将每次 GMM 拟合时间控制在 2 分钟以内。
 
     Returns:
         cmss_vals: 1D float32 numpy 数组，形状 [N_total_patches]。
     """
     csma.eval()
     all_vals: List[np.ndarray] = []
+    n_batches = 0
 
     with torch.no_grad():
         for batch in loader:
+            if max_batches != -1 and n_batches >= max_batches:
+                break
             if "rgb_pixel_values" not in batch:
                 continue
             ir_pv  = batch["pixel_values"].to(device)
@@ -218,11 +259,14 @@ def collect_cmss_values(
             feat_ir = extract_dino_backbone_features(
                 dino_model, pseudo_rgb, input_ids, attention_mask
             )
-            cmss = compute_cmss(feat_rgb, feat_ir)      # [B, L]
-            all_vals.append(cmss.cpu().numpy().astype(np.float32).flatten())
+            cmss_map = compute_cmss(feat_rgb, feat_ir)      # [B, L]
+            all_vals.append(cmss_map.cpu().numpy().astype(np.float32).flatten())
+            n_batches += 1
 
     csma.train()
-    return np.concatenate(all_vals) if all_vals else np.array([0.5], dtype=np.float32)
+    result = np.concatenate(all_vals) if all_vals else np.array([0.5], dtype=np.float32)
+    print(f"[collect_cmss] 采样 {n_batches} batch，获得 {len(result):,} 个 CMSS 值")
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -247,6 +291,10 @@ def main() -> None:
     parser.add_argument("--loss-mode",     type=str, default=None,
                         choices=["full", "det_only", "align_only"],
                         help="覆盖 loss_mode（flir_v2 模式默认强制为 det_only）")
+    parser.add_argument("--gmm-batches",   type=int, default=None,
+                        help="GMM 采样 batch 数上限（-1=全量；默认读 config gmm_max_batches=200）")
+    parser.add_argument("--max-steps",     type=int, default=None,
+                        help="每 epoch 最大训练步数（-1=全量）；smoke test 可设为 20")
     parser.add_argument("--use-swanlab",   action="store_true",             help="启用 SwanLab 记录")
     parser.add_argument("--swanlab-project",  type=str, default="csma-training")
     parser.add_argument("--swanlab-run-name", type=str, default="csma-run")
@@ -254,9 +302,11 @@ def main() -> None:
 
     # Phase 5.1：构建 CSMAConfig（命令行可覆盖字段）
     overrides: Dict[str, Any] = {}
-    if args.epochs     is not None: overrides["total_epochs"]  = args.epochs
-    if args.batch_size is not None: overrides["batch_size"]    = args.batch_size
-    if args.lr         is not None: overrides["lr"]            = args.lr
+    if args.epochs      is not None: overrides["total_epochs"]      = args.epochs
+    if args.batch_size  is not None: overrides["batch_size"]        = args.batch_size
+    if args.lr          is not None: overrides["lr"]                = args.lr
+    if args.gmm_batches is not None: overrides["gmm_max_batches"]   = args.gmm_batches
+    if args.max_steps   is not None: overrides["max_steps_per_epoch"] = args.max_steps
     overrides["ir_data_root"]  = args.data_root
     overrides["rgb_data_root"] = args.rgb_data_root
     overrides["output_dir"]    = args.out_dir
@@ -282,6 +332,22 @@ def main() -> None:
 
     # Phase 5.2：处理器与文本编码
     processor = AutoProcessor.from_pretrained(cfg.model_id)
+    # FLIR IR 原始分辨率 640×512；Grounding DINO processor 默认 shortest_edge=800 会放大图像，
+    # 导致显存激增（800×1000 vs 640×512）。将 shortest_edge/longest_edge 限制在原始尺度内。
+    if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "size"):
+        ip = processor.image_processor
+        # SizeDict 可通过属性或下标赋值
+        try:
+            cur_se = ip.size.shortest_edge or 0
+        except AttributeError:
+            cur_se = ip.size.get("shortest_edge", 0) or 0
+        if cur_se > cfg.img_size:
+            try:
+                ip.size.shortest_edge = cfg.img_size
+                ip.size.longest_edge  = cfg.img_size * 2   # 保持宽高比不被截断
+            except AttributeError:
+                ip.size = {"shortest_edge": cfg.img_size, "longest_edge": cfg.img_size * 2}
+            print(f"[train_csma] processor image size 限制到 shortest_edge={cfg.img_size}, longest_edge={cfg.img_size*2}")
     tokenizer = processor.tokenizer
     encoded = tokenizer(cfg.text_prompt, return_tensors="pt")
     input_ids_base:       torch.Tensor = encoded["input_ids"].to(device)
@@ -295,6 +361,7 @@ def main() -> None:
     dino.eval()
     for p in dino.parameters():
         p.requires_grad = False
+    # GroundingDINO 暂不支持 gradient_checkpointing_enable()，主要依赖 AMP 节省显存
 
     # Phase 5.4：实例化 CSMA、优化器、调度器、课程调度器
     csma = CSMA(cfg).to(device)
@@ -302,6 +369,11 @@ def main() -> None:
     optimizer = AdamW(csma.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfg.total_epochs)
     cmss_sched = CMSSScheduler(cfg)
+
+    # AMP GradScaler（fp16 下防梯度下溢）
+    use_amp = cfg.use_amp and device.type == "cuda"
+    scaler = GradScaler(enabled=use_amp)
+    print(f"[train_csma] AMP={'开启 fp16' if use_amp else '关闭（fp32）'}")
 
     # Phase 5.5：数据集与 DataLoader
     if args.dataset == "flir_v1":
@@ -370,12 +442,15 @@ def main() -> None:
         if cmss_sched.should_update_gmm(epoch):
             print(f"[train_csma] Epoch {epoch}: 重新拟合 GMM...")
             cmss_vals = collect_cmss_values(
-                dino, csma, loader, device, input_ids_base, attention_mask_base
+                dino, csma, loader, device, input_ids_base, attention_mask_base,
+                max_batches=cfg.gmm_max_batches,
             )
             if len(cmss_vals) >= cfg.gmm_n_components:
                 cmss_sched.update_gmm(cmss_vals)
                 mu1, mu2, mu3 = cmss_sched.sorted_means
                 print(f"[train_csma] GMM 均值更新: μ₁={mu1:.3f}  μ₂={mu2:.3f}  μ₃={mu3:.3f}")
+            # GMM 采样后释放显存碎片，避免训练前向 OOM
+            torch.cuda.empty_cache()
 
         stage = cmss_sched.get_stage(epoch)
         lambda_align, lambda_det = cmss_sched.get_loss_weights(epoch)
@@ -386,7 +461,11 @@ def main() -> None:
         ep_loss_det:    List[float] = []
         ep_loss_align:  List[float] = []
 
+        max_steps = cfg.max_steps_per_epoch
+        ep_step = 0
         for batch in loader:
+            if max_steps != -1 and ep_step >= max_steps:
+                break
             ir_pv  = batch["pixel_values"].to(device)
             pm     = batch["pixel_mask"].to(device)
             labels = _move_labels_to_device(batch["labels"], device)
@@ -395,61 +474,93 @@ def main() -> None:
             input_ids = input_ids_base.expand(bsz, -1)
             attn_mask = attention_mask_base.expand(bsz, -1)
 
-            # Phase 5.8：CSMA 前向 → 伪 RGB
-            pseudo_rgb = csma(ir_pv)
+            # Phase 5.8 + 5.9 + 5.10：AMP 混合精度前向
+            with _maybe_autocast(use_amp):
+                # Phase 5.8：CSMA 前向 → 伪 RGB
+                pseudo_rgb = csma(ir_pv)
 
-            # Phase 5.9：L_det（冻结 DINO 前向）
-            outputs = dino(
-                pixel_values=pseudo_rgb,
-                pixel_mask=pm,
-                input_ids=input_ids,
-                attention_mask=attn_mask,
-                labels=labels,
-            )
-            if outputs.loss is None:
-                raise RuntimeError("outputs.loss 为 None，请确认 transformers>=4.40 且 labels 非空。")
-            l_det, det_scalars = _build_det_loss(outputs, cfg)
+                # Phase 5.9：L_det（冻结 DINO 前向）
+                # 同步通过 hook 捕获 encoder 特征，供 L_align 复用（省去第三次 DINO 前向）
+                _feat_ir_cache: Dict[str, torch.Tensor] = {}
 
-            # Phase 5.10：L_align（需 RGB 配对）
-            l_align = torch.tensor(0.0, device=device)
-            if "rgb_pixel_values" in batch:
-                rgb_pv = batch["rgb_pixel_values"].to(device)
+                def _capture_hook(module: nn.Module, inp: tuple, out: Any) -> None:
+                    if inp and isinstance(inp[0], torch.Tensor):
+                        _feat_ir_cache["feat"] = inp[0]
+                    elif hasattr(out, "last_hidden_state_vision"):
+                        _feat_ir_cache["feat"] = out.last_hidden_state_vision
+                    elif hasattr(out, "last_hidden_state"):
+                        _feat_ir_cache["feat"] = out.last_hidden_state
+                    elif isinstance(out, (tuple, list)):
+                        for o in out:
+                            if isinstance(o, torch.Tensor):
+                                _feat_ir_cache["feat"] = o
+                                break
 
-                with torch.no_grad():
-                    feat_rgb = extract_dino_backbone_features(
-                        dino, rgb_pv, input_ids_base, attention_mask_base
+                _hook_handle = dino.model.encoder.register_forward_hook(_capture_hook)
+                try:
+                    outputs = dino(
+                        pixel_values=pseudo_rgb,
+                        pixel_mask=pm,
+                        input_ids=input_ids,
+                        attention_mask=attn_mask,
+                        labels=labels,
                     )
-                feat_ir = extract_dino_backbone_features(
-                    dino, pseudo_rgb, input_ids_base, attention_mask_base
-                )
+                finally:
+                    _hook_handle.remove()
 
-                cmss_map = compute_cmss(feat_rgb.detach(), feat_ir.detach())
-                mask = build_cmss_mask(
-                    cmss_map, stage,
-                    mu1, mu2, mu3,
-                    cfg.mask_ratio,
-                    cmss_sched.gmm,
-                )
-                l_align = compute_align_loss(feat_ir, feat_rgb, mask)
+                if outputs.loss is None:
+                    raise RuntimeError("outputs.loss 为 None，请确认 transformers>=4.40 且 labels 非空。")
+                l_det, det_scalars = _build_det_loss(outputs, cfg)
 
-            # Phase 5.11：总损失与反传
-            loss = lambda_align * l_align + lambda_det * l_det
+                # Phase 5.10：L_align（需 RGB 配对）
+                # feat_ir 复用 L_det 前向捕获的特征；仅额外做一次 RGB no_grad 前向
+                l_align = torch.tensor(0.0, device=device)
+                if "rgb_pixel_values" in batch and "feat" in _feat_ir_cache:
+                    rgb_pv = batch["rgb_pixel_values"].to(device)
+
+                    with torch.no_grad():
+                        feat_rgb = extract_dino_backbone_features(
+                            dino, rgb_pv, input_ids_base, attention_mask_base
+                        )
+                    feat_ir = _feat_ir_cache["feat"]
+
+                    cmss_map = compute_cmss(feat_rgb.detach(), feat_ir.detach())
+                    mask = build_cmss_mask(
+                        cmss_map, stage,
+                        mu1, mu2, mu3,
+                        cfg.mask_ratio,
+                        cmss_sched.gmm,
+                    )
+                    l_align = compute_align_loss(feat_ir, feat_rgb, mask)
+                    del rgb_pv, feat_rgb
+
+                loss = lambda_align * l_align + lambda_det * l_det
+
+            # Phase 5.11：AMP 反传 + 梯度裁剪
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            nn.utils.clip_grad_norm_(csma.parameters(), cfg.grad_clip)
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
 
-            # Phase 5.12：梯度检查（第一个 batch，继承自 train_demo.py）
+            # Phase 5.12：梯度检查（第一个有效 step）— 在 backward 后、step 前执行
             if not grad_checked:
                 csma_grad = sum(
                     p.grad.abs().sum().item()
                     for p in csma.parameters() if p.grad is not None
                 )
                 dino_grads = [p.grad for p in dino.parameters()]
-                assert csma_grad > 0.0, "CSMA 梯度为 0，计算图可能断裂"
-                assert all(g is None for g in dino_grads), "冻结的 DINO 不应有梯度"
-                print(f"[梯度检查] CSMA grad L1 = {csma_grad:.6f}；DINO 参数 grad 均为 None: OK")
-                grad_checked = True
+                # NaN 来自 fp16 初始 overflow（scaler 会自动调整 scale）；
+                # 等到梯度合法（有限 & 非零）再置 checked
+                if math.isnan(csma_grad) or math.isinf(csma_grad):
+                    print(f"[梯度检查] 跳过（梯度={csma_grad:.6g}，等待 scaler 稳定）")
+                else:
+                    assert csma_grad > 0.0, "CSMA 梯度为 0，计算图可能断裂"
+                    assert all(g is None for g in dino_grads), "冻结的 DINO 不应有梯度"
+                    print(f"[梯度检查] CSMA grad L1 = {csma_grad:.6f}；DINO 参数 grad 均为 None: OK")
+                    grad_checked = True
+
+            nn.utils.clip_grad_norm_(csma.parameters(), cfg.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
 
             # ── 统计累积 ─────────────────────────────────────────────────────
             loss_val   = float(loss.detach().cpu())
@@ -458,6 +569,15 @@ def main() -> None:
             ep_loss_det.append(det_scalars["loss_det"])
             ep_loss_align.append(align_val)
             global_step += 1
+            ep_step     += 1
+
+            # 每 10 步打印一次进度
+            if ep_step % 10 == 0 or ep_step == 1:
+                print(
+                    f"  Ep{epoch} Step{ep_step:5d}  "
+                    f"loss={loss_val:.4f}  det={det_scalars['loss_det']:.4f}  "
+                    f"align={align_val:.5f}  scale={scaler.get_scale():.0f}"
+                )
 
             if swan_run is not None:
                 swan_run.log({

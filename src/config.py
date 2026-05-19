@@ -28,6 +28,9 @@ class CSMAConfig:
     mask_ratio: float = 0.75
     gmm_n_components: int = 3
     gmm_update_every: int = 10
+    # GMM 采样上限（每次重拟合最多使用的 batch 数）；-1 表示遍历全量
+    # 100 batch（≈200~800 张图）足够拟合 3 分量 GMM；smoke test 用 50
+    gmm_max_batches: int = 100
 
     # Loss weights
     stage_loss_weights: list[tuple[float, float]] = field(
@@ -44,6 +47,16 @@ class CSMAConfig:
     rgb_data_root: str = "train/rgb"
     text_prompt: str = "person. car."
     num_workers: int = 4
+
+    # 调试 / 快速验证
+    # 每 epoch 最大步数；-1=全量。smoke test 设 20 可在 2 分钟内完成 epoch
+    max_steps_per_epoch: int = -1
+
+    # 内存优化
+    use_amp: bool = True             # 混合精度（fp16）训练，节省 ~50% 显存
+    grad_ckpt: bool = False          # GroundingDINO 不支持 gradient_checkpointing_enable()
+    # processor 图像尺寸上限（shortest_edge）；FLIR IR 640×512，不必放大到 800+
+    img_size: int = 512
 
     # Paths / runtime outputs
     model_id: str = "IDEA-Research/grounding-dino-tiny"
@@ -99,6 +112,8 @@ class CSMAConfig:
             raise ValueError("gmm_n_components must be > 0")
         if self.gmm_update_every <= 0:
             raise ValueError("gmm_update_every must be > 0")
+        if self.gmm_max_batches != -1 and self.gmm_max_batches <= 0:
+            raise ValueError("gmm_max_batches must be > 0 or -1 (unlimited)")
 
         if self.num_rgb_prototypes <= 0:
             raise ValueError("num_rgb_prototypes must be > 0")

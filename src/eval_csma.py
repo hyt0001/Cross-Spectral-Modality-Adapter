@@ -203,10 +203,11 @@ def run_eval(
             bsz   = ir_pv.shape[0]
 
             pseudo_rgb = csma(ir_pv)
-            h, w = pseudo_rgb.shape[-2], pseudo_rgb.shape[-1]
-            target_sizes = torch.tensor(
-                [[h, w]] * bsz, dtype=torch.int64, device=device
-            )
+            # target_sizes 必须用原始图像尺寸（GT 坐标系），而非处理后张量尺寸。
+            # pixel_mask=1 表示有效像素，通过 mask 的行/列 sum 反推原始 H/W。
+            orig_h = pm[:, :, 0].sum(dim=1).long()   # [B]
+            orig_w = pm[:, 0, :].sum(dim=1).long()   # [B]
+            target_sizes = torch.stack([orig_h, orig_w], dim=1).to(device)  # [B,2]
 
             outputs = dino(
                 pixel_values=pseudo_rgb,
@@ -289,6 +290,7 @@ def compute_map(coco_gt: COCO, predictions: List[Dict]) -> Dict[str, Any]:
         ev.params.iouThrs = np.array([0.5])
         ev.evaluate()
         ev.accumulate()
+        ev.summarize()   # 必须调用 summarize() 才能填充 ev.stats
         return max(float(ev.stats[0]), 0.0)
 
     return {
@@ -332,12 +334,29 @@ def main() -> None:
 
     model_id = "IDEA-Research/grounding-dino-tiny"
     processor = AutoProcessor.from_pretrained(model_id)
+
+    # 与训练保持一致：限制 processor 图像尺寸为 cfg.img_size，
+    # 否则默认 shortest_edge=800 会导致预测框坐标与 GT（原始尺寸）不匹配，AP=0
+    cfg = CSMAConfig()
+    if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "size"):
+        ip = processor.image_processor
+        try:
+            cur_se = ip.size.shortest_edge or 0
+        except AttributeError:
+            cur_se = ip.size.get("shortest_edge", 0) or 0
+        if cur_se > cfg.img_size:
+            try:
+                ip.size.shortest_edge = cfg.img_size
+                ip.size.longest_edge  = cfg.img_size * 2
+            except AttributeError:
+                ip.size = {"shortest_edge": cfg.img_size, "longest_edge": cfg.img_size * 2}
+            print(f"[eval_csma] processor image size 限制到 shortest_edge={cfg.img_size}")
+
     dino = GroundingDinoForObjectDetection.from_pretrained(model_id).to(device)
     dino.eval()
     for p in dino.parameters():
         p.requires_grad = False
 
-    cfg = CSMAConfig()
     csma = CSMA(cfg).to(device)
     state = torch.load(args.ckpt, map_location=device, weights_only=True)
     csma.load_state_dict(state)

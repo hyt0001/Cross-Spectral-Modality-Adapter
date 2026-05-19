@@ -24,9 +24,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-EPOCHS="${EPOCHS:-100}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-LR="${LR:-1e-3}"
+EPOCHS="${EPOCHS:-30}"
+# img_size=512 下 8GB GPU 安全 batch=2（AMP fp16）；内存充裕时可用 BATCH_SIZE=4 覆盖
+BATCH_SIZE="${BATCH_SIZE:-2}"
+LR="${LR:-1e-4}"
+# max_steps=-1 表示全量（3928步/epoch ≈ 4.4h/epoch）
+# 建议 200（400 张/epoch，30epoch≈13h）；可通过 MAX_STEPS=200 覆盖
+MAX_STEPS="${MAX_STEPS:--1}"
 LOSS_MODE="${LOSS_MODE:-full}"
 
 DATA_ROOT="${PROJECT_ROOT}/FLIR_License/train"
@@ -46,7 +50,7 @@ mkdir -p "${OUT_DIR}/logs"
 
 echo "========================================================"
 echo " CSMA 主训练（FLIR v1 配对数据集）"
-echo " loss_mode=${LOSS_MODE}  epochs=${EPOCHS}  batch=${BATCH_SIZE}  lr=${LR}"
+echo " loss_mode=${LOSS_MODE}  epochs=${EPOCHS}  batch=${BATCH_SIZE}  lr=${LR}  max_steps=${MAX_STEPS}"
 echo " 数据:  ${DATA_ROOT}"
 echo " 输出:  ${OUT_DIR}"
 echo " 开始:  $(date '+%Y-%m-%d %H:%M:%S')"
@@ -55,6 +59,7 @@ echo "========================================================"
 CUDA_VISIBLE_DEVICES=0 \
 HF_HUB_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 conda run --no-capture-output -n RGBtest \
     python3 -m src.train_csma \
         --dataset     flir_v1 \
@@ -64,6 +69,8 @@ conda run --no-capture-output -n RGBtest \
         --batch-size  "${BATCH_SIZE}" \
         --lr          "${LR}" \
         --loss-mode   "${LOSS_MODE}" \
+        --gmm-batches 100 \
+        ${MAX_STEPS:+--max-steps "${MAX_STEPS}"} \
     2>&1 | tee "${LOG_FILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}
