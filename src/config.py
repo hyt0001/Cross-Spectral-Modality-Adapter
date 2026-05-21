@@ -32,6 +32,10 @@ class CSMAConfig:
     # 100 batch（≈200~800 张图）足够拟合 3 分量 GMM；smoke test 用 50
     gmm_max_batches: int = 100
 
+    # 课程阶段边界：None 时用 [T//3, 2T//3]；若设 hard_max_epochs 则 Hard 仅占最后 N 个 epoch
+    stage_epoch_boundaries: list[int] | None = None
+    hard_max_epochs: int | None = None
+
     # Loss weights
     stage_loss_weights: list[tuple[float, float]] = field(
         default_factory=lambda: [(1.0, 0.1), (0.5, 0.5), (0.1, 1.0)]
@@ -135,3 +139,15 @@ class CSMAConfig:
             la, ld = pair
             if la < 0 or ld < 0:
                 raise ValueError(f"stage_loss_weights[{idx}] values must be >= 0")
+
+        if self.stage_epoch_boundaries is not None:
+            if len(self.stage_epoch_boundaries) != 2:
+                raise ValueError("stage_epoch_boundaries must be [easy_end, mixed_end] (2 ints)")
+            b0, b1 = self.stage_epoch_boundaries
+            if not (0 < b0 < b1 <= self.total_epochs):
+                raise ValueError(
+                    "stage_epoch_boundaries must satisfy 0 < b0 < b1 <= total_epochs"
+                )
+        if self.hard_max_epochs is not None:
+            if self.hard_max_epochs <= 0 or self.hard_max_epochs >= self.total_epochs:
+                raise ValueError("hard_max_epochs must be in (0, total_epochs)")

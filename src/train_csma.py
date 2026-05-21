@@ -13,8 +13,10 @@ CSMA 训练主程序。
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
+import signal
 from typing import Any, Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -40,7 +42,7 @@ def _maybe_autocast(enabled: bool):
     else:
         yield
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor, GroundingDinoForObjectDetection
 
@@ -52,6 +54,84 @@ from src.dataset_flir_v1 import FlirV1PairedDataset, build_flir_v1_category_map,
 from src.dataset_flir_v2 import FlirADASV2Dataset, build_flir_v2_category_map, collate_flir_v2
 from src.dataset_paired import FlirPairedDataset, collate_paired
 from src.infer_vis import save_multi_sample_grid
+
+_emergency_save_requested = False
+
+
+def _request_emergency_save(signum: int, frame: Any) -> None:
+    global _emergency_save_requested
+    _emergency_save_requested = True
+    print(f"[train_csma] 收到信号 {signum}，本 epoch 结束后将写入 latest.pt / emergency.pt")
+
+
+def _load_csma_state_dict(ckpt_path: str, map_location: Any) -> Dict[str, torch.Tensor]:
+    raw = torch.load(ckpt_path, map_location=map_location, weights_only=True)
+    if isinstance(raw, dict) and "csma" in raw:
+        return raw["csma"]
+    if isinstance(raw, dict):
+        return raw
+    raise TypeError(f"无法从 checkpoint 解析 state_dict: {ckpt_path}")
+
+
+def _save_csma_weights(path: str, csma: nn.Module) -> None:
+    torch.save(csma.state_dict(), path)
+
+
+def _write_latest_meta(ckpt_dir: str, epoch: int) -> None:
+    meta = {
+        "epoch": epoch,
+        "completed_epochs": epoch + 1,
+        "note": "epoch 为 0-based；completed_epochs 为已完成的训练轮数",
+    }
+    with open(os.path.join(ckpt_dir, "latest_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+
+def _default_val_data_root(train_root: str) -> str:
+    """FLIR_License/train → FLIR_License/val"""
+    root = train_root.rstrip(os.sep)
+    if os.path.basename(root) == "train":
+        return os.path.join(os.path.dirname(root), "val")
+    return os.path.join(os.path.dirname(root), "val")
+
+
+def _append_jsonl(path: str, record: Dict[str, Any]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _run_val_map(
+    csma: nn.Module,
+    dino: nn.Module,
+    processor: Any,
+    val_dataset: Any,
+    valid_cat_ids: frozenset,
+    device: torch.device,
+    dataset_mode: str,
+    batch_size: int,
+    box_threshold: float,
+    text_threshold: float,
+) -> Dict[str, Any]:
+    """在 val 上跑一轮 mAP（复用 eval_csma）。"""
+    from src.eval_csma import _build_gt_coco, compute_map, run_eval
+
+    coco_gt = _build_gt_coco(val_dataset, valid_cat_ids)
+    csma.eval()
+    try:
+        predictions = run_eval(
+            csma, dino, processor, val_dataset, device,
+            batch_size=batch_size,
+            num_workers=2,
+            box_threshold=box_threshold,
+            text_threshold=text_threshold,
+            dataset_mode=dataset_mode,
+        )
+        metrics = compute_map(coco_gt, predictions)
+    finally:
+        csma.train()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return metrics
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -298,6 +378,38 @@ def main() -> None:
     parser.add_argument("--use-swanlab",   action="store_true",             help="启用 SwanLab 记录")
     parser.add_argument("--swanlab-project",  type=str, default="csma-training")
     parser.add_argument("--swanlab-run-name", type=str, default="csma-run")
+    parser.add_argument("--init-ckpt",     type=str, default=None,
+                        help="从已有 CSMA 权重继续训练（仅加载 csma，不含优化器）")
+    parser.add_argument("--start-epoch",   type=int, default=0,
+                        help="起始 epoch（0-based）；需与 --init-ckpt 对应，如从 epoch_0030 续训则填 31")
+    parser.add_argument("--val-early-stop", action="store_true",
+                        help="在 stage1 末段按 val mAP@0.5 保存最佳 ckpt（best_stage1.pt）")
+    parser.add_argument("--val-data-root", type=str, default=None,
+                        help="val 目录；默认将 train 路径中的 train 替换为 val")
+    parser.add_argument("--val-start",     type=int, default=25,
+                        help="开始 val 评测的 epoch（0-based，含）")
+    parser.add_argument("--val-end",       type=int, default=33,
+                        help="结束 val 评测的 epoch（0-based，含）；对应 stage1 末段")
+    parser.add_argument("--val-every",     type=int, default=1,
+                        help="在 [val-start,val-end] 内每隔 N 个 epoch 评一次")
+    parser.add_argument("--val-batch-size", type=int, default=4,
+                        help="val 推理 batch size")
+    parser.add_argument("--val-box-threshold",  type=float, default=0.05)
+    parser.add_argument("--val-text-threshold", type=float, default=0.05)
+    parser.add_argument("--stop-after-stage1", action="store_true",
+                        help="完成 Mixed 末轮后停止训练，跳过 Hard（避免破坏伪 RGB）")
+    parser.add_argument("--hard-max-epochs", type=int, default=None,
+                        help="Hard 阶段最多训练 N 个 epoch（默认 2T/3 起至结束；如 5 表示仅最后 5 轮）")
+    parser.add_argument("--stage-boundaries", type=str, default=None,
+                        help="手动指定阶段边界 'easy_end,mixed_end'，0-based 下一 stage 起始 epoch")
+    parser.add_argument("--val-manual", action="store_true",
+                        help="使用 --val-start/--val-end 原值；默认按课程自动对齐 Mixed 末段")
+    parser.add_argument("--warmup-epochs", type=int, default=0,
+                        help="学习率线性 warmup 轮数（默认 0 = 不 warmup）；"
+                             "建议 2–5，保护初始化不被大梯度冲垮")
+    parser.add_argument("--stage-weights", type=str, default=None,
+                        help="手动指定三阶段损失权重，格式 'a0,d0;a1,d1;a2,d2'，"
+                             "如 '1.0,0.0;0.8,0.2;0.5,0.5'（先对齐再检测）")
     args = parser.parse_args()
 
     # Phase 5.1：构建 CSMAConfig（命令行可覆盖字段）
@@ -307,6 +419,26 @@ def main() -> None:
     if args.lr          is not None: overrides["lr"]                = args.lr
     if args.gmm_batches is not None: overrides["gmm_max_batches"]   = args.gmm_batches
     if args.max_steps   is not None: overrides["max_steps_per_epoch"] = args.max_steps
+    if args.hard_max_epochs is not None:
+        overrides["hard_max_epochs"] = args.hard_max_epochs
+    if args.stage_weights:
+        try:
+            parsed = [
+                tuple(float(v) for v in pair.split(","))
+                for pair in args.stage_weights.split(";")
+            ]
+            if len(parsed) != 3 or any(len(p) != 2 for p in parsed):
+                raise ValueError()
+            overrides["stage_loss_weights"] = [tuple(p) for p in parsed]  # type: ignore[misc]
+        except Exception:
+            raise ValueError(
+                "--stage-weights 格式错误，示例: '1.0,0.0;0.8,0.2;0.5,0.5'"
+            )
+    if args.stage_boundaries:
+        parts = [int(x.strip()) for x in args.stage_boundaries.split(",")]
+        if len(parts) != 2:
+            raise ValueError("--stage-boundaries 格式应为 'easy_end,mixed_end'")
+        overrides["stage_epoch_boundaries"] = parts
     overrides["ir_data_root"]  = args.data_root
     overrides["rgb_data_root"] = args.rgb_data_root
     overrides["output_dir"]    = args.out_dir
@@ -326,7 +458,8 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[train_csma] 设备: {device}")
 
-    os.makedirs(os.path.join(cfg.output_dir, "ckpt"), exist_ok=True)
+    ckpt_dir = os.path.join(cfg.output_dir, "ckpt")
+    os.makedirs(ckpt_dir, exist_ok=True)
     os.makedirs(os.path.join(cfg.output_dir, "logs"), exist_ok=True)
     os.makedirs(os.path.join(cfg.output_dir, "vis"),  exist_ok=True)
 
@@ -365,10 +498,42 @@ def main() -> None:
 
     # Phase 5.4：实例化 CSMA、优化器、调度器、课程调度器
     csma = CSMA(cfg).to(device)
+    start_epoch = max(0, args.start_epoch)
+    if args.init_ckpt:
+        state = _load_csma_state_dict(args.init_ckpt, device)
+        csma.load_state_dict(state)
+        print(f"[train_csma] 已加载权重: {args.init_ckpt}，从 epoch {start_epoch} 继续")
+    elif start_epoch > 0:
+        raise ValueError("--start-epoch>0 时必须提供 --init-ckpt")
     csma.train()
     optimizer = AdamW(csma.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfg.total_epochs)
+
+    warmup_epochs = max(0, args.warmup_epochs)
+    cosine_epochs = max(1, cfg.total_epochs - warmup_epochs)
+    cosine_sched = CosineAnnealingLR(optimizer, T_max=cosine_epochs)
+    if warmup_epochs > 0:
+        warmup_sched = LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+        )
+        lr_scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[warmup_epochs],
+        )
+        print(f"[train_csma] LR warmup: {warmup_epochs} epoch  {cfg.lr*0.1:.2e} → {cfg.lr:.2e}")
+    else:
+        lr_scheduler = cosine_sched
+
     cmss_sched = CMSSScheduler(cfg)
+    b_easy, b_mixed = cmss_sched.stage_boundaries
+    n_hard = cfg.total_epochs - b_mixed
+    print(
+        f"[train_csma] 课程: Easy epoch[0,{b_easy})  "
+        f"Mixed[{b_easy},{b_mixed})  Hard[{b_mixed},{cfg.total_epochs})  "
+        f"（Hard 共 {n_hard} epoch）"
+    )
+
+    signal.signal(signal.SIGUSR1, _request_emergency_save)
 
     # AMP GradScaler（fp16 下防梯度下溢）
     use_amp = cfg.use_amp and device.type == "cuda"
@@ -420,6 +585,47 @@ def main() -> None:
     )
     print(f"[train_csma] 数据集大小: {len(dataset)}，每 epoch {len(loader)} 个 batch")
 
+    # Val 早停（stage1 末段按 mAP@0.5 选 best_stage1.pt）
+    val_dataset = None
+    val_valid_ids: Optional[frozenset] = None
+    val_jsonl = os.path.join(cfg.output_dir, "logs", "val_early_stop.jsonl")
+    best_stage1_path = os.path.join(ckpt_dir, "best_stage1.pt")
+    best_stage1_meta_path = os.path.join(ckpt_dir, "best_stage1_meta.json")
+    best_val_map = -1.0
+    best_val_epoch = -1
+    use_val_early_stop = args.val_early_stop
+    if use_val_early_stop:
+        if args.dataset != "flir_v1":
+            print("[train_csma] 警告: --val-early-stop 当前仅支持 flir_v1，已忽略")
+            use_val_early_stop = False
+        else:
+            val_root = args.val_data_root or _default_val_data_root(cfg.ir_data_root)
+            if not os.path.isdir(val_root):
+                raise FileNotFoundError(f"val 目录不存在: {val_root}")
+            val_dataset = FlirV1PairedDataset(
+                root=val_root,
+                processor=processor,
+                text_prompt=cfg.text_prompt,
+                category_map=cat_map,
+                valid_cat_ids=valid_ids,
+            )
+            val_valid_ids = valid_ids
+            print(
+                f"[train_csma] Val 早停: epoch [{args.val_start},{args.val_end}] "
+                f"every={args.val_every}  val={val_root}  → {best_stage1_path}"
+            )
+            if args.stop_after_stage1:
+                print("[train_csma] 将在 Mixed 末轮后停止训练（跳过 Hard）")
+
+    val_start_eff = args.val_start
+    val_end_eff = args.val_end
+    if use_val_early_stop and not args.val_manual:
+        val_end_eff = cmss_sched.stage1_last_epoch()
+        val_start_eff = max(start_epoch, val_end_eff - 8)
+        print(
+            f"[train_csma] Val 窗口自动对齐 Mixed 末段: epoch [{val_start_eff},{val_end_eff}]"
+        )
+
     # Phase 5.6：SwanLab 初始化
     swan_run = _build_swanlab_logger(
         enable=args.use_swanlab,
@@ -436,7 +642,10 @@ def main() -> None:
     # ══════════════════════════════════════════════════════════════════════════
     # 训练循环
     # ══════════════════════════════════════════════════════════════════════════
-    for epoch in range(cfg.total_epochs):
+    stop_training = False
+    for epoch in range(start_epoch, cfg.total_epochs):
+        if stop_training:
+            break
 
         # Phase 5.7：GMM 定期更新
         if cmss_sched.should_update_gmm(epoch):
@@ -617,10 +826,20 @@ def main() -> None:
                 "train/epoch":            epoch + 1,
             })
 
+        # 每 epoch 写入 latest（便于暂停评测 / 断点续训）
+        latest_path = os.path.join(ckpt_dir, "latest.pt")
+        _save_csma_weights(latest_path, csma)
+        _write_latest_meta(ckpt_dir, epoch)
+        if _emergency_save_requested:
+            emerg_path = os.path.join(ckpt_dir, f"emergency_epoch_{epoch:04d}.pt")
+            _save_csma_weights(emerg_path, csma)
+            print(f"  [ckpt] 紧急快照: {emerg_path}")
+            _emergency_save_requested = False
+
         # Phase 5.13：定期保存权重 + 可视化
         if epoch % cfg.vis_every == 0 or epoch == cfg.total_epochs - 1:
-            ckpt_path = os.path.join(cfg.output_dir, "ckpt", f"epoch_{epoch:04d}.pt")
-            torch.save(csma.state_dict(), ckpt_path)
+            ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
+            _save_csma_weights(ckpt_path, csma)
 
             vis_path = os.path.join(cfg.output_dir, "vis", f"epoch_{epoch:04d}.png")
             samples = [dataset[i] for i in range(min(3, len(dataset)))]
@@ -635,10 +854,75 @@ def main() -> None:
             except Exception as exc:
                 print(f"  [vis] 可视化失败（不影响训练）: {exc}")
 
+        # Val 早停：stage1 末段（默认 epoch 25–33）按 mAP@0.5 更新 best_stage1.pt
+        if (
+            use_val_early_stop
+            and val_dataset is not None
+            and val_valid_ids is not None
+            and val_start_eff <= epoch <= val_end_eff
+            and (epoch - val_start_eff) % max(1, args.val_every) == 0
+        ):
+            print(f"[train_csma] Val 评测 epoch {epoch} ...")
+            metrics = _run_val_map(
+                csma, dino, processor, val_dataset, val_valid_ids, device,
+                args.dataset, args.val_batch_size,
+                args.val_box_threshold, args.val_text_threshold,
+            )
+            metrics["epoch"] = epoch
+            metrics["stage"] = stage
+            _append_jsonl(val_jsonl, metrics)
+            print(
+                f"  [val] epoch={epoch}  mAP@0.5={metrics['map_50']:.4f}  "
+                f"person={metrics['ap_person']:.4f}  car={metrics['ap_car']:.4f}"
+            )
+            if metrics["map_50"] > best_val_map:
+                best_val_map = metrics["map_50"]
+                best_val_epoch = epoch
+                _save_csma_weights(best_stage1_path, csma)
+                snap = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
+                _save_csma_weights(snap, csma)
+                with open(best_stage1_meta_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "best_epoch": epoch,
+                            "map_50": best_val_map,
+                            "map_50_95": metrics["map_50_95"],
+                            "ap_person": metrics["ap_person"],
+                            "ap_car": metrics["ap_car"],
+                            "val_data_root": args.val_data_root or _default_val_data_root(cfg.ir_data_root),
+                        },
+                        f,
+                        indent=2,
+                    )
+                print(f"  [val] ★ 新最佳 → {best_stage1_path}  (epoch {epoch})")
+            if swan_run is not None:
+                swan_run.log({
+                    "val/map_50": metrics["map_50"],
+                    "val/map_50_95": metrics["map_50_95"],
+                    "val/best_map_50": best_val_map,
+                    "val/best_epoch": best_val_epoch,
+                    "val/epoch": epoch + 1,
+                })
+
+        if args.stop_after_stage1 and epoch >= cmss_sched.stage1_last_epoch():
+            msg = (
+                f"[train_csma] 已完成 Mixed 末轮 epoch {cmss_sched.stage1_last_epoch()}，"
+                f"stop-after-stage1：跳过 Hard（共 {n_hard} epoch 未训）"
+            )
+            if best_val_epoch >= 0:
+                msg += f"  最佳 val epoch={best_val_epoch} mAP@0.5={best_val_map:.4f}"
+            print(msg)
+            stop_training = True
+
     # ── 训练结束 ─────────────────────────────────────────────────────────────
     final_ckpt = os.path.join(cfg.output_dir, "ckpt", "csma_last.pt")
-    torch.save(csma.state_dict(), final_ckpt)
+    _save_csma_weights(final_ckpt, csma)
     print(f"[train_csma] 训练完成，最终权重: {final_ckpt}")
+    if best_val_epoch >= 0:
+        print(
+            f"[train_csma] Stage1 最佳: epoch {best_val_epoch}  mAP@0.5={best_val_map:.4f}  "
+            f"→ {best_stage1_path}"
+        )
 
     # 绘制 loss 曲线
     loss_png = os.path.join(cfg.output_dir, "logs", "loss.png")

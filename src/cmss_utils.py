@@ -157,19 +157,37 @@ class CMSSScheduler:
     对应 M-SpecGene GMM_CMSS_SAMPLE 中 maskratio_bias / sample_range 动态调整逻辑的
     显式化版本，将连续动态调整离散化为三个阶段，降低实现复杂度（MVP 原则）。
 
-    阶段边界：
+    阶段边界（默认）：
         A（Easy）:  epoch ∈ [0,  T/3)
         B（Mixed）: epoch ∈ [T/3, 2T/3)
-        C（Hard）:  epoch ∈ [2T/3, T]
+        C（Hard）:  epoch ∈ [2T/3, T)
+    若 cfg.hard_max_epochs=N：Hard 仅占最后 N 个 epoch（缩短 Hard，保护伪 RGB）。
     """
 
     def __init__(self, cfg: CSMAConfig) -> None:
         self._cfg = cfg
         t = cfg.total_epochs
-        self._stage_boundaries: list[int] = [t // 3, t * 2 // 3]
+        if cfg.stage_epoch_boundaries is not None:
+            self._stage_boundaries = list(cfg.stage_epoch_boundaries)
+        elif cfg.hard_max_epochs is not None:
+            # Hard 仅最后 hard_max_epochs 轮；Easy 仍约 T/3，其余为 Mixed
+            b0 = t // 3
+            b1 = max(b0 + 1, t - cfg.hard_max_epochs)
+            self._stage_boundaries = [b0, b1]
+        else:
+            self._stage_boundaries = [t // 3, t * 2 // 3]
         self._gmm_update_every: int = cfg.gmm_update_every
         self._gmm: Optional[GaussianMixture] = None
         self._sorted_means: Optional[np.ndarray] = None
+
+    @property
+    def stage_boundaries(self) -> tuple[int, int]:
+        """(easy_end, mixed_end) 均为 0-based 下一阶段的起始 epoch。"""
+        return self._stage_boundaries[0], self._stage_boundaries[1]
+
+    def stage1_last_epoch(self) -> int:
+        """Mixed 阶段最后一个 epoch（0-based），即进入 Hard 的前一轮。"""
+        return self._stage_boundaries[1] - 1
 
     # ── 阶段查询 ──────────────────────────────────────────────────────────────
 

@@ -24,7 +24,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-EPOCHS="${EPOCHS:-30}"
+EPOCHS="${EPOCHS:-35}"
+HARD_MAX_EPOCHS="${HARD_MAX_EPOCHS:-}"
 # img_size=512 下 8GB GPU 安全 batch=2（AMP fp16）；内存充裕时可用 BATCH_SIZE=4 覆盖
 BATCH_SIZE="${BATCH_SIZE:-2}"
 LR="${LR:-1e-4}"
@@ -50,7 +51,7 @@ mkdir -p "${OUT_DIR}/logs"
 
 echo "========================================================"
 echo " CSMA 主训练（FLIR v1 配对数据集）"
-echo " loss_mode=${LOSS_MODE}  epochs=${EPOCHS}  batch=${BATCH_SIZE}  lr=${LR}  max_steps=${MAX_STEPS}"
+echo " loss_mode=${LOSS_MODE}  epochs=${EPOCHS}  batch=${BATCH_SIZE}  lr=${LR}  max_steps=${MAX_STEPS}  hard_max=${HARD_MAX_EPOCHS:-auto}"
 echo " 数据:  ${DATA_ROOT}"
 echo " 输出:  ${OUT_DIR}"
 echo " 开始:  $(date '+%Y-%m-%d %H:%M:%S')"
@@ -71,6 +72,7 @@ conda run --no-capture-output -n RGBtest \
         --loss-mode   "${LOSS_MODE}" \
         --gmm-batches 100 \
         ${MAX_STEPS:+--max-steps "${MAX_STEPS}"} \
+        ${HARD_MAX_EPOCHS:+--hard-max-epochs "${HARD_MAX_EPOCHS}"} \
     2>&1 | tee "${LOG_FILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}

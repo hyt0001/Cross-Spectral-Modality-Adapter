@@ -218,7 +218,7 @@ def run_eval(
 
             results_list = processor.post_process_grounded_object_detection(
                 outputs,
-                input_ids=input_ids_base,
+                input_ids=input_ids_base.expand(bsz, -1),
                 threshold=box_threshold,
                 text_threshold=text_threshold,
                 target_sizes=target_sizes,
@@ -358,7 +358,8 @@ def main() -> None:
         p.requires_grad = False
 
     csma = CSMA(cfg).to(device)
-    state = torch.load(args.ckpt, map_location=device, weights_only=True)
+    raw = torch.load(args.ckpt, map_location=device, weights_only=True)
+    state = raw["csma"] if isinstance(raw, dict) and "csma" in raw else raw
     csma.load_state_dict(state)
     csma.eval()
     print("[eval_csma] CSMA 权重已加载")

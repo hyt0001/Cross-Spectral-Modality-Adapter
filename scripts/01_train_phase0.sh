@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "${PROJECT_ROOT}"
 
-export EPOCHS="${EPOCHS:-50}"
+export EPOCHS="${EPOCHS:-35}"
+export HARD_MAX_EPOCHS="${HARD_MAX_EPOCHS:-5}"
 export BATCH_SIZE="${BATCH_SIZE:-2}"
 export MAX_STEPS="${MAX_STEPS:--1}"
 export LR="${LR:-1e-4}"
@@ -28,7 +29,8 @@ export LOSS_MODE="${LOSS_MODE:-full}"
 
 mkdir -p outputs_csma/logs
 
-echo "[phase0] 启动参数: EPOCHS=${EPOCHS} BATCH_SIZE=${BATCH_SIZE} MAX_STEPS=${MAX_STEPS} LOSS_MODE=${LOSS_MODE}"
+echo "[phase0] 启动参数: EPOCHS=${EPOCHS} HARD_MAX=${HARD_MAX_EPOCHS} BATCH_SIZE=${BATCH_SIZE} MAX_STEPS=${MAX_STEPS} LOSS_MODE=${LOSS_MODE}"
+echo "[phase0] 推荐 val 早停+跳过 Hard: bash scripts/01_train_phase0_early_stop.sh"
 echo "[phase0] 日志: outputs_csma/logs/train.log"
 echo "[phase0] PID: $$  时间: $(date '+%Y-%m-%d %H:%M:%S')"
 
