@@ -39,12 +39,13 @@ export MAX_STEPS="${MAX_STEPS:--1}"
 export LR="${LR:-1e-4}"
 export LOSS_MODE="${LOSS_MODE:-full}"
 export WARMUP_EPOCHS="${WARMUP_EPOCHS:-3}"
-# 三阶段损失权重：Stage0 纯对齐 → Stage1 轻引入 det → Stage2 均衡
+# 三阶段损失权重：Stage0 以对齐为主 → Stage1 轻引入 det → Stage2 均衡
 # 与原来 (1.0,0.1)→(0.5,0.5)→(0.1,1.0) 的关键区别：
-#   - Stage0 完全不引入 det（λ_det=0），让 CSMA 先学好 IR→RGB 映射
+#   - Stage0 保持 λ_det=0.1（最小保底，确保梯度路径通畅；l_align 量级极小，纯0时梯度断裂）
 #   - Stage1 轻量引入 det（λ_det=0.2），验证对齐已稳定再施压
 #   - Stage2 均衡（λ_det=0.5），而非原来的极端 1.0
-export STAGE_WEIGHTS="${STAGE_WEIGHTS:-1.0,0.0;0.8,0.2;0.5,0.5}"
+# 注意：train_csma.py 会自动将 λ_det clamp 到 >=0.05，防止梯度断裂
+export STAGE_WEIGHTS="${STAGE_WEIGHTS:-1.0,0.1;0.8,0.2;0.5,0.5}"
 export HARD_MAX_EPOCHS="${HARD_MAX_EPOCHS:-0}"
 export STOP_AFTER_STAGE1="${STOP_AFTER_STAGE1:-1}"
 export VAL_EARLY_STOP="${VAL_EARLY_STOP:-1}"

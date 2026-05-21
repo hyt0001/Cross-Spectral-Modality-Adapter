@@ -663,6 +663,10 @@ def main() -> None:
 
         stage = cmss_sched.get_stage(epoch)
         lambda_align, lambda_det = cmss_sched.get_loss_weights(epoch)
+        # λ_det=0 时 CSMA 梯度只能走 l_align 路径，但 l_align 量级比 l_det 小 5 个数量级，
+        # FP16 scaler 尚未稳定时极易被舍入为 0，导致梯度断裂。
+        # 保持 λ_det 最小值 0.05，确保 l_det 始终提供一条可靠的梯度路径。
+        lambda_det = max(lambda_det, 0.05)
         mu1, mu2, mu3 = cmss_sched.sorted_means
 
         # ── Epoch 统计累积 ───────────────────────────────────────────────────
