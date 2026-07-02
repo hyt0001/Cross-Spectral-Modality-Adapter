@@ -374,9 +374,9 @@ def main() -> None:
     # Phase 4.1：加载处理器与 DINO
     model_id = "IDEA-Research/grounding-dino-tiny"
     text_prompt = "person. car."
-    processor = AutoProcessor.from_pretrained(model_id)
+    processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
     dino: GroundingDinoForObjectDetection = (
-        GroundingDinoForObjectDetection.from_pretrained(model_id).to(device)
+        GroundingDinoForObjectDetection.from_pretrained(model_id, local_files_only=True).to(device)
     )
     dino.eval()
     for p in dino.parameters():

@@ -5,16 +5,28 @@ from typing import Any, Literal
 
 
 LossMode = Literal["align_only", "det_only", "full"]
+AdapterMode = Literal["pixel", "feature"]
+ValMetric = Literal["map_50", "person_car_mean"]
 
 
 @dataclass
 class CSMAConfig:
-    # Model structure
+    # 适配器模式：pixel=CSMA 像素翻译；feature=FeatureAdapter 特征级适配
+    adapter_mode: AdapterMode = "pixel"
+
+    # Model structure (pixel / CSMA)
     ir_enc_channels: list[int] = field(default_factory=lambda: [32, 64, 128, 256])
     num_rgb_prototypes: int = 512
     proto_dim: int = 256
     num_cross_attn_heads: int = 8
     use_residual: bool = True
+
+    # FeatureAdapter 结构（feature 模式）
+    fa_hidden_dim: int = 512
+    fa_num_layers: int = 3
+    fa_use_residual: bool = True
+    # 最后一层 Linear 零初始化，使训练初期 out≈x（恒等映射）
+    fa_zero_init: bool = True
 
     # Training pipeline
     total_epochs: int = 100
@@ -35,6 +47,11 @@ class CSMAConfig:
     # 课程阶段边界：None 时用 [T//3, 2T//3]；若设 hard_max_epochs 则 Hard 仅占最后 N 个 epoch
     stage_epoch_boundaries: list[int] | None = None
     hard_max_epochs: int | None = None
+    # True 时 Mixed 延续至训练结束，永不进入 Hard（Stage C）
+    skip_hard_stage: bool = False
+
+    # Val 早停指标：map_50=六类/全类 mAP；person_car_mean=仅 person+car AP 均值（M3FD 推荐）
+    val_metric: ValMetric = "map_50"
 
     # Loss weights
     stage_loss_weights: list[tuple[float, float]] = field(
@@ -45,6 +62,25 @@ class CSMAConfig:
     det_w_ce_enc: float = 0.1
     det_w_bbox_enc: float = 0.5
     det_w_giou_enc: float = 0.5
+    # 像素重建损失权重：MSE(pseudo_rgb, rgb_real)，量级≈0.1-1.0，弥补 L_align 极小的问题
+    # 设为 0.0 可完全禁用（向后兼容）
+    lambda_recon: float = 1.0
+    # pseudo 正则（OWL Final Model 对齐项）
+    lambda_id: float = 0.0          # MSE(pseudo, IR)；M3FD 降低可减 car 假框
+    lambda_tv: float = 0.0          # Total Variation 平滑
+    lambda_logit_reg: float = 0.0   # 检测 logit 均值正则
+    pseudo_clamp: float = 0.0       # pseudo 像素 clamp 上限；0=不 clamp
+    residual_scale: float = 1.0     # pseudo = IR + scale * delta
+    ema_decay: float = 0.0          # >0 时启用 EMA；0=关闭
+
+    # 多层 L_align：指定要对齐的 DINO encoder 层索引（0-based，最多 6 层）。
+    # 空列表 [] 表示只对齐 encoder 入口特征（原始行为）。
+    # 建议 [1, 3, 5]（浅/中/深层），每层独立计算余弦对齐损失后取平均。
+    align_layer_indices: list[int] = field(default_factory=lambda: [1, 3, 5])
+
+    # bbox 加权 L_align：GT 框区域内的 patch 权重倍率（>1 加强目标区域对齐）。
+    # 设为 1.0 退化为均匀权重（原始行为）。
+    bbox_align_weight: float = 3.0
 
     # Data
     ir_data_root: str = "train"
@@ -130,6 +166,20 @@ class CSMAConfig:
 
         if self.loss_mode not in ("align_only", "det_only", "full"):
             raise ValueError("loss_mode must be one of: align_only, det_only, full")
+        if self.lambda_recon < 0:
+            raise ValueError("lambda_recon must be >= 0")
+        if self.lambda_id < 0:
+            raise ValueError("lambda_id must be >= 0")
+        if self.lambda_tv < 0:
+            raise ValueError("lambda_tv must be >= 0")
+        if self.lambda_logit_reg < 0:
+            raise ValueError("lambda_logit_reg must be >= 0")
+        if self.pseudo_clamp < 0:
+            raise ValueError("pseudo_clamp must be >= 0")
+        if self.residual_scale < 0:
+            raise ValueError("residual_scale must be >= 0")
+        if not (0.0 <= self.ema_decay < 1.0):
+            raise ValueError("ema_decay must be in [0, 1)")
 
         if len(self.stage_loss_weights) != 3:
             raise ValueError("stage_loss_weights must contain exactly 3 stage tuples")
@@ -151,3 +201,18 @@ class CSMAConfig:
         if self.hard_max_epochs is not None:
             if self.hard_max_epochs <= 0 or self.hard_max_epochs >= self.total_epochs:
                 raise ValueError("hard_max_epochs must be in (0, total_epochs)")
+        if self.val_metric not in ("map_50", "person_car_mean"):
+            raise ValueError("val_metric must be 'map_50' or 'person_car_mean'")
+
+        if self.adapter_mode not in ("pixel", "feature"):
+            raise ValueError("adapter_mode must be 'pixel' or 'feature'")
+        if self.fa_hidden_dim <= 0:
+            raise ValueError("fa_hidden_dim must be > 0")
+        if self.fa_num_layers < 2:
+            raise ValueError("fa_num_layers must be >= 2")
+
+        if self.adapter_mode == "feature":
+            if self.lambda_recon != 0.0:
+                raise ValueError("feature 模式要求 lambda_recon=0.0")
+            if len(self.align_layer_indices) != 0:
+                raise ValueError("feature 模式要求 align_layer_indices=[]（单层 token 对齐）")

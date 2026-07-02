@@ -167,7 +167,11 @@ class CMSSScheduler:
     def __init__(self, cfg: CSMAConfig) -> None:
         self._cfg = cfg
         t = cfg.total_epochs
-        if cfg.stage_epoch_boundaries is not None:
+        if cfg.skip_hard_stage:
+            # Easy + Mixed 覆盖全部 epoch，永不进入 Hard
+            b0 = max(1, t // 3)
+            self._stage_boundaries = [b0, t]
+        elif cfg.stage_epoch_boundaries is not None:
             self._stage_boundaries = list(cfg.stage_epoch_boundaries)
         elif cfg.hard_max_epochs is not None:
             # Hard 仅最后 hard_max_epochs 轮；Easy 仍约 T/3，其余为 Mixed

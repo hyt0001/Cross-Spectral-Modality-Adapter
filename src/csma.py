@@ -136,10 +136,19 @@ class PixelDecoder(nn.Module):
         skip_c2: torch.Tensor,
         skip_c1: torch.Tensor,
     ) -> torch.Tensor:
+        # 奇数输入尺寸时 ConvTranspose2d 输出可能比 skip 大 1，裁到 skip 的空间尺寸
         x = self.up3(feat)
+        if x.shape[-2:] != skip_c2.shape[-2:]:
+            x = torch.nn.functional.interpolate(
+                x, size=skip_c2.shape[-2:], mode="bilinear", align_corners=False
+            )
         x = torch.cat([x, skip_c2], dim=1)
         x = self.fuse3(x)
         x = self.up2(x)
+        if x.shape[-2:] != skip_c1.shape[-2:]:
+            x = torch.nn.functional.interpolate(
+                x, size=skip_c1.shape[-2:], mode="bilinear", align_corners=False
+            )
         x = torch.cat([x, skip_c1], dim=1)
         x = self.fuse2(x)
         x = self.up1(x)
@@ -179,9 +188,19 @@ class CSMA(nn.Module):
         feat = c3.flatten(2).transpose(1, 2)
         feat = self.rpca(feat)
         feat_map = feat.transpose(1, 2).reshape(B, self.cfg.proto_dim, H8, W8)
-        pseudo_rgb = self.pd(feat_map, c2, c1)
+        pseudo_delta = self.pd(feat_map, c2, c1)
+        # ConvTranspose2d 在奇数输入尺寸时可能多出 1 pixel，裁回原始 H/W
+        if pseudo_delta.shape[-2:] != x.shape[-2:]:
+            pseudo_delta = torch.nn.functional.interpolate(
+                pseudo_delta, size=x.shape[-2:], mode="bilinear", align_corners=False
+            )
         if self.cfg.use_residual:
-            pseudo_rgb = pseudo_rgb + x
+            pseudo_rgb = x + self.cfg.residual_scale * pseudo_delta
+        else:
+            pseudo_rgb = pseudo_delta
+        if self.cfg.pseudo_clamp > 0.0:
+            lim = float(self.cfg.pseudo_clamp)
+            pseudo_rgb = pseudo_rgb.clamp(-lim, lim)
         return pseudo_rgb
 
     def get_intermediate_features(self, x: torch.Tensor) -> torch.Tensor:

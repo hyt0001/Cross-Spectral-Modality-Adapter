@@ -1,0 +1,115 @@
+{
+  "flir_baseline": {
+    "mode": "baseline_dino",
+    "dataset": "flir_v1_val",
+    "text_prompt": "person. car.",
+    "json_path": "outputs_csma/logs/eval_flir_baseline_val.json",
+    "coco_summary": {
+      "map_50": 0.49,
+      "map_50_95": 0.258,
+      "map_75": 0.236,
+      "ap_small_50_95": 0.141,
+      "ap_medium_50_95": 0.349,
+      "ap_large_50_95": 0.591,
+      "ar_all_50_95_max1": 0.142,
+      "ar_all_50_95_max10": 0.407,
+      "ar_all_50_95_max100": 0.454,
+      "ar_small_50_95": 0.297,
+      "ar_medium_50_95": 0.541,
+      "ar_large_50_95": 0.791
+    }
+  },
+  "canonical_flir_best": {
+    "out_dir": "outputs_csma",
+    "ckpt": "outputs_csma/ckpt/best_stage1.pt",
+    "best_epoch": 12,
+    "json_path": "outputs_csma/logs/eval_flir_csma_best_ep12_coco.json",
+    "coco_summary": {
+      "map_50": 0.593,
+      "map_50_95": 0.332,
+      "map_75": 0.32,
+      "ap_small_50_95": 0.156,
+      "ap_medium_50_95": 0.434,
+      "ap_large_50_95": 0.704,
+      "ar_all_50_95_max1": 0.136,
+      "ar_all_50_95_max10": 0.416,
+      "ar_all_50_95_max100": 0.483,
+      "ar_small_50_95": 0.319,
+      "ar_medium_50_95": 0.577,
+      "ar_large_50_95": 0.792
+    },
+    "per_class_iou50": {
+      "person": { "ap": 0.687, "ar_max100": 0.958 },
+      "car": { "ap": 0.499, "ar_max100": 0.668 }
+    }
+  },
+  "flir_baseline_vs_csma_delta": {
+    "map_50": 0.103,
+    "map_50_95": 0.074,
+    "map_75": 0.084,
+    "ar_all_50_95_max100": 0.029
+  },
+  "llvip_baseline": {
+    "mode": "baseline_dino",
+    "dataset": "llvip_test",
+    "text_prompt": "person.",
+    "n_images": 3463,
+    "n_gt": 8302,
+    "json_path": "outputs_csma/logs/eval_llvip_baseline.json",
+    "coco_summary": {
+      "map_50": 0.857,
+      "map_50_95": 0.564,
+      "map_75": 0.627,
+      "ar_all_50_95_max100": 0.715,
+      "ap_medium_50_95": 0.235,
+      "ap_large_50_95": 0.581
+    },
+    "per_class": {
+      "person": {
+        "ap_50": 0.857,
+        "ap_75": 0.627,
+        "ar_max100": 0.715
+      }
+    }
+  },
+  "llvip_zero_shot_csma_best": {
+    "ckpt": "outputs_csma_v3/ckpt/epoch_0000.pt",
+    "flir_train_epoch": 0,
+    "json_path": "outputs_csma/logs/eval_llvip_csma_best_coco.json",
+    "batch_eval_json": "outputs_csma_v3/logs/eval_all_ckpts_llvip.json",
+    "coco_summary": {
+      "map_50": 0.867,
+      "map_50_95": 0.572,
+      "map_75": 0.636,
+      "ar_all_50_95_max100": 0.717
+    },
+    "per_class": {
+      "person": {
+        "ap_50": 0.867,
+        "ap_75": 0.636,
+        "ar_max100": 0.717
+      }
+    }
+  },
+  "llvip_zero_shot_flir_best": {
+    "ckpt": "outputs_csma/ckpt/best_stage1.pt",
+    "flir_train_epoch": 12,
+    "json_path": "outputs_csma/logs/eval_llvip_csma_flir_best_coco.json",
+    "map_50": 0.818,
+    "map_50_95": 0.54,
+    "ap_person": 0.818
+  },
+  "llvip_baseline_vs_csma_best_delta": {
+    "map_50": 0.009,
+    "map_50_95": 0.008,
+    "map_75": 0.009,
+    "ar_all_50_95_max100": 0.002,
+    "person_ap_50": 0.009,
+    "person_ap_75": 0.009,
+    "person_ar_max100": 0.002
+  },
+  "llvip_baseline_vs_flir_best_delta": {
+    "map_50": -0.039,
+    "map_50_95": -0.024
+  }
+}

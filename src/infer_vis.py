@@ -292,8 +292,8 @@ def main() -> None:
     model_id = "IDEA-Research/grounding-dino-tiny"
     text_prompt = "person. car."
 
-    processor = AutoProcessor.from_pretrained(model_id)
-    dino = GroundingDinoForObjectDetection.from_pretrained(model_id).to(device)
+    processor = AutoProcessor.from_pretrained(model_id, local_files_only=True)
+    dino = GroundingDinoForObjectDetection.from_pretrained(model_id, local_files_only=True).to(device)
     dino.eval()
     for p in dino.parameters():
         p.requires_grad = False

@@ -17,7 +17,15 @@ FLIR_ADAS_v2/
 # 训练产出与权重
 outputs_csma/
 outputs_csma_smoke/
+outputs_csma_v2/
+outputs_csma_v3/
+outputs_flir_*/
+outputs_m3fd_*/
 outputs_smoke/
+
+# 本地数据集（LLVIP / M3FD 等，体积过大勿 push）
+LLVIP/
+M3FD/
 wandb/
 swanlog/
 

@@ -182,7 +182,7 @@ def cmd_build_knowledge(overrides: dict[str, Any], gmm_batches: int) -> None:
     out_knowledge = Path(cfg.output_dir) / "knowledge"
     out_knowledge.mkdir(parents=True, exist_ok=True)
 
-    processor = AutoProcessor.from_pretrained(cfg.model_id)
+    processor = AutoProcessor.from_pretrained(cfg.model_id, local_files_only=True)
     if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "size"):
         ip = processor.image_processor
         try:
@@ -191,7 +191,7 @@ def cmd_build_knowledge(overrides: dict[str, Any], gmm_batches: int) -> None:
         except AttributeError:
             ip.size = {"shortest_edge": cfg.img_size, "longest_edge": cfg.img_size * 2}
 
-    dino = GroundingDinoForObjectDetection.from_pretrained(cfg.model_id).to(device)
+    dino = GroundingDinoForObjectDetection.from_pretrained(cfg.model_id, local_files_only=True).to(device)
     dino.eval()
     for p in dino.parameters():
         p.requires_grad = False
@@ -292,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval = sub.add_parser("eval", help="mAP 评测")
     p_eval.add_argument("--ckpt", type=str, required=True)
     p_eval.add_argument("--data-root", type=str, default="FLIR_License/val")
-    p_eval.add_argument("--dataset", type=str, default="flir_v1", choices=["flir_v1", "flir_v2"])
+    p_eval.add_argument("--dataset", type=str, default="flir_v1", choices=["flir_v1", "flir_v2", "llvip"])
     p_eval.add_argument("--out-json", type=str, default="outputs_csma/logs/eval_result.json")
     p_eval.add_argument("--batch-size", type=int, default=4)
 
