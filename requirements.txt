@@ -6,3 +6,5 @@ pycocotools
 numpy
 swanlab
 scikit-learn
+ultralytics>=8.3.0
+clip @ git+https://github.com/ultralytics/CLIP.git

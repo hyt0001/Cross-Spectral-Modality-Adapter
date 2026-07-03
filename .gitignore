@@ -41,3 +41,10 @@ FLIR_License/
 
 GroundingDINO-main/
 M-SpecGene-main/
+# 各实验线训练产出与运行日志
+outputs_csma_*/
+outputs_csma_resume_run.log
+outputs_*_run.log
+*.log
+FLIR_License
+模型更换建议.md
