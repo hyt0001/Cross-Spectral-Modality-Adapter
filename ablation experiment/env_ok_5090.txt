@@ -1,0 +1,10 @@
+python: /root/miniconda3/bin/python
+python version: 3.10.8 (main, Nov 24 2022, 14:13:03) [GCC 11.2.0]
+torch: 2.8.0+cu128
+torchvision: 0.23.0+cu128
+transformers: 5.9.0
+numpy: 1.26.4
+torch cuda: 12.8
+cuda available: True
+gpu: NVIDIA GeForce RTX 5090
+capability: (12, 0)

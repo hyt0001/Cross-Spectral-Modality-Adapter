@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# scripts/00_smoke_test.sh
+#
+# CSMA pipeline 快速验证（2 epoch，batch=2）
+# 使用 FLIR v1 配对数据集，loss_mode=full（L_det + L_align）
+#
+# 目标：确认梯度流正常、det loss / align loss 均下降、checkpoint 生成
+#
+# 用法：
+#   bash scripts/00_smoke_test.sh
+#   LOSS_MODE=det_only bash scripts/00_smoke_test.sh   # 仅测 det 损失
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+LOSS_MODE="${LOSS_MODE:-full}"
+DATA_ROOT="${PROJECT_ROOT}/FLIR_License/train"
+OUT_DIR="${PROJECT_ROOT}/outputs_smoke"
+LOG_FILE="${OUT_DIR}/smoke_test.log"
+
+if [[ ! -d "${DATA_ROOT}" ]]; then
+    echo "[ERROR] 数据目录不存在: ${DATA_ROOT}"
+    exit 1
+fi
+if [[ ! -f "${DATA_ROOT}/thermal_annotations.json" ]]; then
+    echo "[ERROR] 未找到标注文件: ${DATA_ROOT}/thermal_annotations.json"
+    exit 1
+fi
+
+mkdir -p "${OUT_DIR}"
+
+echo "========================================================"
+echo " CSMA Smoke Test（2 epoch, batch=2, loss_mode=${LOSS_MODE}）"
+echo " 数据集: FLIR v1 配对  ${DATA_ROOT}"
+echo " 输出:   ${OUT_DIR}"
+echo "========================================================"
+
+CUDA_VISIBLE_DEVICES=0 \
+HF_HUB_OFFLINE=1 \
+TRANSFORMERS_OFFLINE=1 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m src.train_csma \
+        --dataset      flir_v1 \
+        --data-root    "${DATA_ROOT}" \
+        --out-dir      "${OUT_DIR}" \
+        --epochs       2 \
+        --batch-size   1 \
+        --loss-mode    "${LOSS_MODE}" \
+        --gmm-batches  50 \
+        --max-steps    20 \
+    2>&1 | tee "${LOG_FILE}"
+
+EXIT_CODE=${PIPESTATUS[0]}
+
+echo ""
+echo "========================================================"
+if [[ $EXIT_CODE -eq 0 ]]; then
+    echo " [OK] Smoke test 通过"
+    ls -lh "${OUT_DIR}/ckpt/"*.pt 2>/dev/null || echo " [WARN] 未找到 checkpoint"
+    echo ""
+    echo " 可继续执行主训练："
+    echo "   bash scripts/01_train.sh"
+else
+    echo " [FAIL] Smoke test 失败（exit code: $EXIT_CODE）"
+    echo " 查看日志: ${LOG_FILE}"
+    exit $EXIT_CODE
+fi
+echo "========================================================"
