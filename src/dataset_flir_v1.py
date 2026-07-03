@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -82,7 +82,6 @@ class FlirV1PairedDataset(Dataset):
         text_prompt: str,
         category_map: Optional[Dict[int, int]] = None,
         valid_cat_ids: Optional[frozenset] = None,
-        ir_aug: Optional[Callable[[Image.Image], Image.Image]] = None,
     ) -> None:
         """
         Args:
@@ -91,13 +90,11 @@ class FlirV1PairedDataset(Dataset):
             text_prompt:   检测 prompt，如 "person. car."
             category_map:  cat_id → class_idx 映射；None 时使用默认 {1:0, 3:1}。
             valid_cat_ids: 有效 cat_id 集合；None 时使用 {1, 3}。
-            ir_aug:        可选的 IR 增强 callable（PIL→PIL），训练时传入以改善跨域泛化。
         """
         super().__init__()
         self._root = os.path.abspath(root)
         self._processor = processor
         self._text_prompt = text_prompt
-        self._ir_aug = ir_aug
         self._cat_map: Dict[int, int] = (
             category_map if category_map is not None
             else dict(FLIR_V1_CATEGORY_TO_CLASS_IDX)
@@ -167,8 +164,6 @@ class FlirV1PairedDataset(Dataset):
         stem = os.path.splitext(os.path.basename(img_info["file_name"]))[0]
 
         image = Image.open(img_path).convert("RGB")
-        if self._ir_aug is not None:
-            image = self._ir_aug(image)
         anns = self._id_to_anns.get(img_info["id"], [])
 
         coco_anns: List[Dict[str, Any]] = []

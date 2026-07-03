@@ -82,18 +82,6 @@ class CSMAConfig:
     # 设为 1.0 退化为均匀权重（原始行为）。
     bbox_align_weight: float = 3.0
 
-    # Pseudo-RGB 正则（参照 Final Model 配置；默认值向后兼容已有 checkpoint）
-    # id_loss：限制 pseudo 与输入 IR 的 L1 距离，防止 car 亮块原样透传导致假框激增
-    id_loss_weight: float = 0.005
-    # tv_loss：total variation，鼓励 pseudo 图像平滑、减少噪点框
-    tv_loss_weight: float = 0.05
-    # logit_reg：对 GDINO 解码器 logits 的 L1 正则，抑制整体置信度过高
-    logit_reg_weight: float = 0.02
-    # pseudo_clamp：截断 pseudo 像素极端值（GDINO 归一化空间）；0 = 不截断（兼容旧权重）
-    pseudo_clamp: float = 2.0
-    # residual_scale：残差加法系数；1.0 = 当前行为（兼容旧权重），Final Model 推荐 0.05
-    residual_scale: float = 1.0
-
     # Data
     ir_data_root: str = "train"
     rgb_data_root: str = "train/rgb"
