@@ -147,6 +147,8 @@ def main() -> None:
                         default="outputs_csma/logs/eval_m3fd_detr_ir_raw.json")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--threshold", type=float, default=0.05)
+    parser.add_argument("--residual-scale", type=float, default=None,
+                        help="覆盖 CSMAConfig.residual_scale（默认 1.0）")
     args = parser.parse_args()
 
     if args.input_mode == "pseudo_rgb":
@@ -159,6 +161,9 @@ def main() -> None:
     print(f"[eval_m3fd_detr] input_mode: {args.input_mode}")
 
     cfg = CSMAConfig()
+    if args.residual_scale is not None:
+        cfg.residual_scale = args.residual_scale
+        print(f"[eval_m3fd_detr] residual_scale 覆盖: {args.residual_scale}")
     dino_proc = AutoProcessor.from_pretrained(cfg.model_id)
     _configure_processor(dino_proc, cfg.img_size)
     ip = dino_proc.image_processor

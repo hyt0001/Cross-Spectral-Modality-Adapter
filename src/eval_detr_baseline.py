@@ -173,6 +173,8 @@ def main() -> None:
     parser.add_argument("--batch-size",  type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--threshold",   type=float, default=0.05)
+    parser.add_argument("--residual-scale", type=float, default=None,
+                        help="覆盖 CSMAConfig.residual_scale（默认 1.0）")
     args = parser.parse_args()
 
     if args.input_mode == "pseudo_rgb":
@@ -195,6 +197,9 @@ def main() -> None:
     print("[eval_detr] DETR 加载完成")
 
     cfg = CSMAConfig()
+    if args.residual_scale is not None:
+        cfg.residual_scale = args.residual_scale
+        print(f"[eval_detr] residual_scale 覆盖: {args.residual_scale}")
     dino_proc = AutoProcessor.from_pretrained(cfg.model_id)
     # 与 eval_yolo_csma 保持一致：限制 processor 最短边 = cfg.img_size(512)，
     # 避免 FLIR 图被放大（640×512 默认会被 processor 放到 1000×800），
@@ -217,7 +222,7 @@ def main() -> None:
     )
     print(f"[eval_detr] val 集: {len(dataset)} 张")
 
-    coco_gt = _build_gt_coco(dataset, valid_ids)
+    coco_gt = _build_gt_coco(dataset, valid_ids, "flir_v1")
     print(f"[eval_detr] GT 框数: {len(coco_gt.anns)}")
 
     print("[eval_detr] 开始推理...")

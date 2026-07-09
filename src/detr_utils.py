@@ -235,7 +235,7 @@ def run_val_map_detr(
     from src.eval_csma import _build_gt_coco, compute_map
     from src.eval_detr_baseline import run_detr_eval
 
-    coco_gt = _build_gt_coco(val_dataset, valid_cat_ids)
+    coco_gt = _build_gt_coco(val_dataset, valid_cat_ids, "flir_v1")
     csma.eval()
     try:
         predictions = run_detr_eval(
